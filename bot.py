@@ -12,8 +12,6 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     ConversationHandler,
-    MessageHandler,
-    filters,
 )
 from telegram.request import HTTPXRequest
 
@@ -21,10 +19,17 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 # Conversation States
-NAME, ROOM, TIME, CONFIRM = range(4)
+TEAM, ROOM, TIME, CONFIRM = range(4)
 
+TEAMS = [f"Team {i}" for i in range(1, 17)]
 ROOMS = ["Conference Room A", "Conference Room B", "Meeting Pod 1"]
 TIME_SLOTS = ["09:00 - 10:00", "10:00 - 11:00", "14:00 - 15:00", "15:00 - 16:00"]
+
+# ==========================================
+# 📌 CONFIGURATION: ROOM BOOKING INFO TOPIC
+# ==========================================
+# Replace 888 with your actual Room Booking Information Topic ID
+BOOKING_TOPIC_ID = 35
 
 
 # --- Dummy HTTP Server for Render Health Checks ---
@@ -67,10 +72,9 @@ def get_sheet():
     return client.open("Room Bookings").sheet1
 
 
-def save_booking_to_sheet(user_id, tg_user, custom_name, room, time_slot):
+def save_booking_to_sheet(user_id, tg_user, team, room, time_slot):
     sheet = get_sheet()
-    # Saves: User ID | Telegram Username | Input Full Name | Room | Time Slot
-    sheet.append_row([str(user_id), tg_user, custom_name, room, time_slot])
+    sheet.append_row([str(user_id), tg_user, team, room, time_slot])
 
 
 def is_slot_booked(room, time_slot):
@@ -87,7 +91,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_type = update.effective_chat.type
     bot_username = (await context.bot.get_me()).username
 
-    # Group Command Trigger
+    # Triggered inside any Team Topic
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
         pm_url = f"https://t.me/{bot_username}?start={group_id}"
@@ -100,32 +104,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ConversationHandler.END
 
-    # Private Chat Trigger
+    # Private Chat Flow
     user = update.effective_user
     tg_handle = f"@{user.username}" if user.username else user.first_name
     context.user_data["telegram_user"] = tg_handle
 
     if context.args and context.args[0] != "book":
-        context.user_data["origin_group_id"] = context.args[0]
+        context.user_data["origin_group_id"] = int(context.args[0])
     else:
         context.user_data["origin_group_id"] = None
 
+    # 4x4 Team selection grid
+    keyboard = []
+    row = []
+    for team in TEAMS:
+        row.append(InlineKeyboardButton(team, callback_data=f"TEAM_{team}"))
+        if len(row) == 4:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        "Welcome to the Room Booking Bot! 🚪\n\nFirst, please type your *Full Name* for the reservation:",
+        "Welcome to the Room Booking Bot! 🚪\n\nPlease select your *Team*:",
         parse_mode="Markdown",
+        reply_markup=reply_markup,
     )
-    return NAME
+    return TEAM
 
 
-async def capture_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    entered_name = update.message.text.strip()
-    context.user_data["full_name"] = entered_name
+async def team_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    selected_team = query.data.replace("TEAM_", "")
+    context.user_data["team"] = selected_team
 
     keyboard = [[InlineKeyboardButton(room, callback_data=room)] for room in ROOMS]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        f"Thank you, *{entered_name}*!\n\nNow, please select a room:",
+    await query.edit_message_text(
+        text=f"Selected: *{selected_team}*\n\nNow, please select a room:",
         parse_mode="Markdown",
         reply_markup=reply_markup,
     )
@@ -180,7 +201,7 @@ async def time_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         text=(
             f"📋 *Reservation Summary*\n"
             f"• *Telegram User:* {context.user_data['telegram_user']}\n"
-            f"• *Full Name:* {context.user_data['full_name']}\n"
+            f"• *Team:* {context.user_data['team']}\n"
             f"• *Room:* {context.user_data['room']}\n"
             f"• *Time:* {selected_time}\n\n"
             f"Confirm booking?"
@@ -198,41 +219,42 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data == "CONFIRM":
         user_id = query.from_user.id
         tg_user = context.user_data["telegram_user"]
-        full_name = context.user_data["full_name"]
+        team = context.user_data["team"]
         room = context.user_data["room"]
         time_slot = context.user_data["time_slot"]
 
-        # Save both TG handle and full name to Google Sheets
-        save_booking_to_sheet(user_id, tg_user, full_name, room, time_slot)
+        # Save to Google Sheets
+        save_booking_to_sheet(user_id, tg_user, team, room, time_slot)
 
-        # Private confirmation message
+        # Private confirmation message to user
         await query.edit_message_text(
             text=(
                 f"🎉 *Booking Confirmed!*\n"
-                f"• *Name:* {full_name} ({tg_user})\n"
+                f"• *Team:* {team} ({tg_user})\n"
                 f"• *Room:* {room}\n"
                 f"• *Time:* {time_slot}"
             ),
             parse_mode="Markdown",
         )
 
-        # Group notification message
+        # Send alert ONLY to the central Room Booking Information Topic
         origin_group_id = context.user_data.get("origin_group_id")
         if origin_group_id:
             try:
-                group_message = (
-                    f"📢 *Room Reservation Alert*\n\n"
-                    f"👤 *Booked by:* {full_name} ({tg_user})\n"
+                booking_alert_message = (
+                    f"📢 *New Room Reservation*\n\n"
+                    f"👥 *Team:* {team} ({tg_user})\n"
                     f"🚪 *Room:* {room}\n"
                     f"⏰ *Time Slot:* {time_slot}"
                 )
                 await context.bot.send_message(
                     chat_id=origin_group_id,
-                    text=group_message,
+                    message_thread_id=BOOKING_TOPIC_ID,  # Always routes to central topic
+                    text=booking_alert_message,
                     parse_mode="Markdown",
                 )
             except Exception as e:
-                print(f"Could not send message to group {origin_group_id}: {e}")
+                print(f"Could not send message to booking info topic: {e}")
 
     else:
         await query.edit_message_text(text="Booking cancelled.")
@@ -256,7 +278,7 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("book", start), CommandHandler("start", start)],
         states={
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, capture_name)],
+            TEAM: [CallbackQueryHandler(team_choice, pattern="^TEAM_")],
             ROOM: [CallbackQueryHandler(room_choice)],
             TIME: [CallbackQueryHandler(time_choice)],
             CONFIRM: [CallbackQueryHandler(confirm_booking)],
@@ -268,7 +290,7 @@ def main():
     )
 
     app.add_handler(conv_handler)
-    print("Bot running with dual name tracking...")
+    print("Bot running with dedicated Booking Topic routing...")
     app.run_polling()
 
 
