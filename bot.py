@@ -1,7 +1,8 @@
 import json
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -19,7 +20,7 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 # Conversation States
-TEAM, ROOM, TIME, CONFIRM = range(4)
+TEAM, ROOM, DATE, TIME, CONFIRM = range(5)
 
 TEAMS = [f"Team {i}" for i in range(1, 17)]
 ROOMS = ["Conference Room A", "Conference Room B", "Meeting Pod 1"]
@@ -28,8 +29,8 @@ TIME_SLOTS = ["09:00 - 10:00", "10:00 - 11:00", "14:00 - 15:00", "15:00 - 16:00"
 # ==========================================
 # 📌 CONFIGURATION: ROOM BOOKING INFO TOPIC
 # ==========================================
-# Replace 888 with your actual Room Booking Information Topic ID
-BOOKING_TOPIC_ID = 35
+# Replace 888 with your actual central Room Booking Info Topic ID
+BOOKING_TOPIC_ID = 888
 
 
 # --- Dummy HTTP Server for Render Health Checks ---
@@ -56,34 +57,85 @@ def get_sheet():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-
     google_creds_json = os.getenv("GOOGLE_CREDENTIALS")
     if google_creds_json:
         creds_dict = json.loads(google_creds_json)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            creds_dict, scope
-        )
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     else:
-        creds = ServiceAccountCredentials.from_json_keyfile_name(
-            "credentials.json", scope
-        )
+        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 
     client = gspread.authorize(creds)
     return client.open("Room Bookings").sheet1
 
 
-def save_booking_to_sheet(user_id, tg_user, team, room, time_slot):
+def save_booking_to_sheet(user_id, tg_user, team, room, time_slot, booking_date):
+    """Saves: User ID | Telegram User | Team | Room | Time Slot | Booking Date"""
     sheet = get_sheet()
-    sheet.append_row([str(user_id), tg_user, team, room, time_slot])
+    sheet.append_row([str(user_id), tg_user, team, room, time_slot, booking_date])
 
 
-def is_slot_booked(room, time_slot):
+def is_slot_booked(room, date_str, time_slot):
     sheet = get_sheet()
     records = sheet.get_all_records()
     for row in records:
-        if row.get("Room") == room and row.get("Time Slot") == time_slot:
+        if (
+            str(row.get("Room")) == room
+            and str(row.get("Booking Date")) == date_str
+            and str(row.get("Time Slot")) == time_slot
+        ):
             return True
     return False
+
+
+def cleanup_expired_bookings():
+    """Deletes rows from Google Sheets whose booking date/time has passed."""
+    try:
+        sheet = get_sheet()
+        records = sheet.get_all_records()
+        now = datetime.now()
+
+        # Reverse loop so row deletions don't mess up shifting indices
+        for idx, row in reversed(list(enumerate(records, start=2))):
+            date_str = str(row.get("Booking Date"))
+            time_slot = str(row.get("Time Slot"))
+
+            if date_str and time_slot and "-" in time_slot:
+                end_time_str = time_slot.split("-")[-1].strip()
+                full_dt_str = f"{date_str} {end_time_str}"
+                try:
+                    booking_end_dt = datetime.strptime(full_dt_str, "%Y-%m-%d %H:%M")
+                    if now > booking_end_dt:
+                        sheet.delete_row(idx)
+                        print(f"Purged expired reservation row {idx}: {row}")
+                except ValueError:
+                    continue
+    except Exception as e:
+        print(f"Error during automatic sheet cleanup: {e}")
+
+
+# --- Helper: Build Dynamic Date Selector Keyboard ---
+def build_date_keyboard(offset_days=0):
+    """Generates 7 days starting from today + offset_days with week navigation."""
+    today = datetime.now() + timedelta(days=offset_days)
+    keyboard = []
+
+    for i in range(7):
+        day_date = today + timedelta(days=i)
+        label = day_date.strftime("%a, %b %d")
+        val = day_date.strftime("%Y-%m-%d")
+        keyboard.append([InlineKeyboardButton(f"📅 {label}", callback_data=f"DATE_{val}")])
+
+    nav_row = []
+    if offset_days >= 7:
+        nav_row.append(
+            InlineKeyboardButton("⬅️ Prev Week", callback_data=f"PAGE_{offset_days - 7}")
+        )
+    nav_row.append(
+        InlineKeyboardButton("Next Week ➡️", callback_data=f"PAGE_{offset_days + 7}")
+    )
+    keyboard.append(nav_row)
+
+    return InlineKeyboardMarkup(keyboard)
 
 
 # --- Bot Command Handlers ---
@@ -91,7 +143,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_type = update.effective_chat.type
     bot_username = (await context.bot.get_me()).username
 
-    # Triggered inside any Team Topic
+    # Group/Supergroup Command Trigger
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
         pm_url = f"https://t.me/{bot_username}?start={group_id}"
@@ -114,7 +166,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     else:
         context.user_data["origin_group_id"] = None
 
-    # 4x4 Team selection grid
+    # 4x4 Team Selection Grid
     keyboard = []
     row = []
     for team in TEAMS:
@@ -126,7 +178,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         keyboard.append(row)
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "Welcome to the Room Booking Bot! 🚪\n\nPlease select your *Team*:",
         parse_mode="Markdown",
@@ -146,34 +197,78 @@ async def team_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(
-        text=f"Selected: *{selected_team}*\n\nNow, please select a room:",
+        text=f"Selected Team: *{selected_team}*\n\nNow, please select a room:",
         parse_mode="Markdown",
         reply_markup=reply_markup,
     )
     return ROOM
 
 
-# --- Callback Handler inside `room_choice` ---
 async def room_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
-    # If the user clicked "Choose another room" after seeing an error
+    # Route back if returning from a fully booked error screen
     if query.data == "CHOOSE_OTHER_ROOM":
         keyboard = [[InlineKeyboardButton(room, callback_data=room)] for room in ROOMS]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            text=f"Selected: *{context.user_data['team']}*\n\nPlease select another room:",
+            text=f"Selected Team: *{context.user_data['team']}*\n\nPlease select another room:",
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
         return ROOM
 
+    # Handle Next/Prev week navigation
+    if query.data.startswith("PAGE_"):
+        offset = int(query.data.replace("PAGE_", ""))
+        reply_markup = build_date_keyboard(offset)
+        await query.edit_message_text(
+            text=f"Selected Room: *{context.user_data['room']}*\n\nSelect a date to book:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+        return DATE
+
     selected_room = query.data
     context.user_data["room"] = selected_room
 
-    # Check if ALL time slots for this room are booked
-    all_booked = all(is_slot_booked(selected_room, slot) for slot in TIME_SLOTS)
+    reply_markup = build_date_keyboard(0)
+    await query.edit_message_text(
+        text=f"Selected Room: *{selected_room}*\n\nSelect a date to book:",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
+    return DATE
+
+
+async def date_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data.startswith("PAGE_"):
+        offset = int(query.data.replace("PAGE_", ""))
+        reply_markup = build_date_keyboard(offset)
+        await query.edit_message_text(
+            text=f"Selected Room: *{context.user_data['room']}*\n\nSelect a date to book:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+        return DATE
+
+    selected_date = query.data.replace("DATE_", "")
+    context.user_data["booking_date"] = selected_date
+    selected_room = context.user_data["room"]
+
+    # Filter out time slots that have already passed for today
+    valid_slots = [
+        slot for slot in TIME_SLOTS if not is_slot_past(selected_date, slot)
+    ]
+
+    # If all remaining slots for today are passed or booked
+    all_booked = not valid_slots or all(
+        is_slot_booked(selected_room, selected_date, slot) for slot in valid_slots
+    )
 
     if all_booked:
         keyboard = [
@@ -183,19 +278,19 @@ async def room_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
             text=(
-                f"⚠️ *Room Fully Booked*\n\n"
-                f"All time slots for *{selected_room}* are currently booked.\n"
-                f"Please choose another room or cancel."
+                f"⚠️ *No Available Slots*\n\n"
+                f"There are no remaining available time slots for *{selected_room}* on *{selected_date}*.\n"
+                f"Please choose another room or date."
             ),
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
-        return ROOM  # Keep user in ROOM state to handle choice or cancellation
+        return ROOM
 
-    # Build normal time slot keyboard
+    # Display only future time slots
     keyboard = []
-    for slot in TIME_SLOTS:
-        if is_slot_booked(selected_room, slot):
+    for slot in valid_slots:
+        if is_slot_booked(selected_room, selected_date, slot):
             keyboard.append(
                 [InlineKeyboardButton(f"❌ {slot} (Booked)", callback_data="DISABLED")]
             )
@@ -204,12 +299,24 @@ async def room_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
-        text=f"Selected Room: *{selected_room}*\nNow pick an available time slot:",
+        text=f"Selected Date: *{selected_date}*\nNow pick an available time slot:",
         parse_mode="Markdown",
         reply_markup=reply_markup,
     )
     return TIME
+    
+def is_slot_past(date_str, time_slot):
+    """Checks if a given slot's START time has already passed today."""
+    try:
+        # Extract start time (e.g., "16:00" from "16:00 - 17:00")
+        start_time_str = time_slot.split("-")[0].strip()
+        full_dt_str = f"{date_str} {start_time_str}"
+        slot_start_dt = datetime.strptime(full_dt_str, "%Y-%m-%d %H:%M")
 
+        # Returns True if current time is ahead of the slot start time
+        return datetime.now() > slot_start_dt
+    except Exception:
+        return False
 
 async def time_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -236,6 +343,7 @@ async def time_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             f"• *Telegram User:* {context.user_data['telegram_user']}\n"
             f"• *Team:* {context.user_data['team']}\n"
             f"• *Room:* {context.user_data['room']}\n"
+            f"• *Date:* {context.user_data['booking_date']}\n"
             f"• *Time:* {selected_time}\n\n"
             f"Confirm booking?"
         ),
@@ -255,22 +363,24 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         team = context.user_data["team"]
         room = context.user_data["room"]
         time_slot = context.user_data["time_slot"]
+        booking_date = context.user_data["booking_date"]
 
         # Save to Google Sheets
-        save_booking_to_sheet(user_id, tg_user, team, room, time_slot)
+        save_booking_to_sheet(user_id, tg_user, team, room, time_slot, booking_date)
 
-        # Private confirmation message to user
+        # Private Chat Confirmation
         await query.edit_message_text(
             text=(
                 f"🎉 *Booking Confirmed!*\n"
                 f"• *Team:* {team} ({tg_user})\n"
                 f"• *Room:* {room}\n"
+                f"• *Date:* {booking_date}\n"
                 f"• *Time:* {time_slot}"
             ),
             parse_mode="Markdown",
         )
 
-        # Send alert ONLY to the central Room Booking Information Topic
+        # Post Alert to Central Booking Info Topic
         origin_group_id = context.user_data.get("origin_group_id")
         if origin_group_id:
             try:
@@ -278,17 +388,17 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     f"📢 *New Room Reservation*\n\n"
                     f"👥 *Team:* {team} ({tg_user})\n"
                     f"🚪 *Room:* {room}\n"
+                    f"📅 *Date:* {booking_date}\n"
                     f"⏰ *Time Slot:* {time_slot}"
                 )
                 await context.bot.send_message(
                     chat_id=origin_group_id,
-                    message_thread_id=BOOKING_TOPIC_ID,  # Always routes to central topic
+                    message_thread_id=BOOKING_TOPIC_ID,
                     text=booking_alert_message,
                     parse_mode="Markdown",
                 )
             except Exception as e:
                 print(f"Could not send message to booking info topic: {e}")
-
     else:
         await query.edit_message_text(text="Booking cancelled.")
 
@@ -304,6 +414,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+async def run_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic job to clean expired sheet entries."""
+    cleanup_expired_bookings()
+
+
 def main():
     request = HTTPXRequest(
         connect_timeout=30.0,
@@ -311,6 +426,10 @@ def main():
     )
 
     app = Application.builder().token(TOKEN).request(request).build()
+
+    # Periodic task: Purges expired bookings every 10 minutes (600 seconds)
+    if app.job_queue:
+        app.job_queue.run_repeating(run_cleanup_job, interval=600, first=10)
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("book", start), CommandHandler("start", start)],
@@ -320,6 +439,7 @@ def main():
                 CallbackQueryHandler(cancel, pattern="^CANCEL$"),
                 CallbackQueryHandler(room_choice),
             ],
+            DATE: [CallbackQueryHandler(date_choice, pattern="^(DATE_|PAGE_)")],
             TIME: [CallbackQueryHandler(time_choice)],
             CONFIRM: [CallbackQueryHandler(confirm_booking)],
         },
@@ -330,7 +450,7 @@ def main():
     )
 
     app.add_handler(conv_handler)
-    print("Bot running with dedicated Booking Topic routing...")
+    print("Bot running with full feature set...")
     app.run_polling()
 
 
