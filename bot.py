@@ -34,7 +34,7 @@ TIME_SLOTS = ["09:00 - 10:00", "10:00 - 11:00", "14:00 - 15:00", "15:00 - 16:00"
 # ==========================================
 # Replace 888 with your actual central Room Booking Info Topic ID
 BOOKING_TOPIC_ID = 35
-
+DEFAULT_GROUP_ID = -1003850589682
 
 
 # --- Dummy HTTP Server for Render Health Checks ---
@@ -159,7 +159,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_type = update.effective_chat.type
     bot_username = (await context.bot.get_me()).username
 
-    # Group/Supergroup Command Trigger
+    # 1. If triggered inside a Group / Supergroup -> Send PM Link
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
         pm_url = f"https://t.me/{bot_username}?start={group_id}"
@@ -172,17 +172,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ConversationHandler.END
 
-    # Private Chat Flow
+    # 2. If triggered in Private Chat (PM) -> Start Conversation
     user = update.effective_user
     tg_handle = f"@{user.username}" if user.username else user.first_name
     context.user_data["telegram_user"] = tg_handle
 
+    # Extract group ID from deep link parameter, or fallback to DEFAULT_GROUP_ID
     if context.args and context.args[0] != "book":
-        context.user_data["origin_group_id"] = int(context.args[0])
+        try:
+            context.user_data["origin_group_id"] = int(context.args[0])
+        except ValueError:
+            context.user_data["origin_group_id"] = DEFAULT_GROUP_ID
     else:
-        context.user_data["origin_group_id"] = None
+        # Fallback: User started the bot directly in PM without a deep link
+        context.user_data["origin_group_id"] = DEFAULT_GROUP_ID
 
-    # 4x4 Team Selection Grid
+    # 3. Build & Display 4x4 Team Selection Grid
     keyboard = []
     row = []
     for team in TEAMS:
@@ -402,9 +407,11 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         # Post Alert to Central Booking Info Topic
-        # Post Alert to Central Booking Info Topic
-        origin_group_id = context.user_data.get("origin_group_id")
-        if origin_group_id:
+        # Post Alert Directly to Central Booking Info Topic (Topic 35)
+        # Get stored origin_group_id, or fall back to DEFAULT_GROUP_ID
+        target_group_id = context.user_data.get("origin_group_id") or DEFAULT_GROUP_ID
+
+        if target_group_id:
             try:
                 booking_alert_message = (
                     f"📢 *New Room Reservation*\n\n"
@@ -414,31 +421,17 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     f"⏰ *Time Slot:* {time_slot}"
                 )
 
-                # 1. Temporarily reopen topic 35
-                try:
-                    await context.bot.reopen_forum_topic(
-                        chat_id=origin_group_id,
-                        message_thread_id=BOOKING_TOPIC_ID
-                    )
-                except Exception:
-                    pass  # If topic is already open, ignore error and proceed
-
-                # 2. Send the message
+                # Send directly to Topic 35 in your supergroup
                 await context.bot.send_message(
-                    chat_id=origin_group_id,
-                    message_thread_id=BOOKING_TOPIC_ID,
+                    chat_id=target_group_id,
+                    message_thread_id=BOOKING_TOPIC_ID, # 35
                     text=booking_alert_message,
                     parse_mode="Markdown",
                 )
-
-                # 3. Lock topic 35 back up immediately
-                await context.bot.close_forum_topic(
-                    chat_id=origin_group_id,
-                    message_thread_id=BOOKING_TOPIC_ID
-                )
+                print(f"Successfully posted alert to group {target_group_id}, topic {BOOKING_TOPIC_ID}!")
 
             except Exception as e:
-                print(f"Could not send message to booking info topic: {e}")
+                print(f"❌ Failed to post alert: {type(e).__name__} - {e}")
     else:
         await query.edit_message_text(text="Booking cancelled.")
 
@@ -457,6 +450,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def run_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
     """Periodic job to clean expired sheet entries."""
     cleanup_expired_bookings()
+
 
 
 def main():
