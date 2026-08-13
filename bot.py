@@ -15,9 +15,12 @@ from telegram.ext import (
     ConversationHandler,
 )
 from telegram.request import HTTPXRequest
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+LOCAL_TZ = ZoneInfo("Asia/Phnom_Penh")
 
 # Conversation States
 TEAM, ROOM, DATE, TIME, CONFIRM = range(5)
@@ -31,6 +34,7 @@ TIME_SLOTS = ["09:00 - 10:00", "10:00 - 11:00", "14:00 - 15:00", "15:00 - 16:00"
 # ==========================================
 # Replace 888 with your actual central Room Booking Info Topic ID
 BOOKING_TOPIC_ID = 35
+
 
 
 # --- Dummy HTTP Server for Render Health Checks ---
@@ -306,15 +310,20 @@ async def date_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return TIME
 
 def is_slot_past(date_str, time_slot):
-    """Checks if a given slot's START time has already passed today."""
+    """Checks if a given slot's START time has already passed in Asia/Phnom_Penh."""
     try:
-        # Extract start time (e.g., "16:00" from "16:00 - 17:00")
         start_time_str = time_slot.split("-")[0].strip()
         full_dt_str = f"{date_str} {start_time_str}"
-        slot_start_dt = datetime.strptime(full_dt_str, "%Y-%m-%d %H:%M")
 
-        # Returns True if current time is ahead of the slot start time
-        return datetime.now() > slot_start_dt
+        # Parse and localize the target slot time
+        slot_start_dt = datetime.strptime(
+            full_dt_str, "%Y-%m-%d %H:%M"
+        ).replace(tzinfo=LOCAL_TZ)
+
+        # Compare against current local time in Phnom Penh
+        now = datetime.now(LOCAL_TZ)
+
+        return now > slot_start_dt
     except Exception:
         return False
 
