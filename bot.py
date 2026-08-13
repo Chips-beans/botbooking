@@ -153,13 +153,46 @@ async def team_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ROOM
 
 
+# --- Callback Handler inside `room_choice` ---
 async def room_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
+    # If the user clicked "Choose another room" after seeing an error
+    if query.data == "CHOOSE_OTHER_ROOM":
+        keyboard = [[InlineKeyboardButton(room, callback_data=room)] for room in ROOMS]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=f"Selected: *{context.user_data['team']}*\n\nPlease select another room:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+        return ROOM
+
     selected_room = query.data
     context.user_data["room"] = selected_room
 
+    # Check if ALL time slots for this room are booked
+    all_booked = all(is_slot_booked(selected_room, slot) for slot in TIME_SLOTS)
+
+    if all_booked:
+        keyboard = [
+            [InlineKeyboardButton("🚪 Choose Another Room", callback_data="CHOOSE_OTHER_ROOM")],
+            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=(
+                f"⚠️ *Room Fully Booked*\n\n"
+                f"All time slots for *{selected_room}* are currently booked.\n"
+                f"Please choose another room or cancel."
+            ),
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+        return ROOM  # Keep user in ROOM state to handle choice or cancellation
+
+    # Build normal time slot keyboard
     keyboard = []
     for slot in TIME_SLOTS:
         if is_slot_booked(selected_room, slot):
@@ -263,7 +296,11 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Operation cancelled.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Booking cancelled.")
+    else:
+        await update.message.reply_text("Operation cancelled.")
     return ConversationHandler.END
 
 
@@ -279,7 +316,10 @@ def main():
         entry_points=[CommandHandler("book", start), CommandHandler("start", start)],
         states={
             TEAM: [CallbackQueryHandler(team_choice, pattern="^TEAM_")],
-            ROOM: [CallbackQueryHandler(room_choice)],
+            ROOM: [
+                CallbackQueryHandler(cancel, pattern="^CANCEL$"),
+                CallbackQueryHandler(room_choice),
+            ],
             TIME: [CallbackQueryHandler(time_choice)],
             CONFIRM: [CallbackQueryHandler(confirm_booking)],
         },
