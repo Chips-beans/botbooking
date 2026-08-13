@@ -30,7 +30,7 @@ TIME_SLOTS = ["09:00 - 10:00", "10:00 - 11:00", "14:00 - 15:00", "15:00 - 16:00"
 # 📌 CONFIGURATION: ROOM BOOKING INFO TOPIC
 # ==========================================
 # Replace 888 with your actual central Room Booking Info Topic ID
-BOOKING_TOPIC_ID = 888
+BOOKING_TOPIC_ID = 35
 
 
 # --- Dummy HTTP Server for Render Health Checks ---
@@ -304,7 +304,7 @@ async def date_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         reply_markup=reply_markup,
     )
     return TIME
-    
+
 def is_slot_past(date_str, time_slot):
     """Checks if a given slot's START time has already passed today."""
     try:
