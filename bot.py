@@ -13,6 +13,9 @@ from telegram.ext import (
     filters,
 )
 from telegram.request import HTTPXRequest
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -23,6 +26,22 @@ NAME, ROOM, TIME, CONFIRM = range(4)
 ROOMS = ["Conference Room A", "Conference Room B", "Meeting Pod 1"]
 TIME_SLOTS = ["09:00 - 10:00", "10:00 - 11:00", "14:00 - 15:00", "15:00 - 16:00"]
 
+
+# Simple HTTP handler for Render health checks
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running 24/7!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    print(f"Dummy HTTP server listening on port {port}")
+    server.serve_forever()
+
+# Start the dummy server in a background thread
+threading.Thread(target=run_dummy_server, daemon=True).start()
 
 def get_sheet():
     scope = [
