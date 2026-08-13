@@ -38,11 +38,23 @@ BOOKING_TOPIC_ID = 35
 
 
 # --- Dummy HTTP Server for Render Health Checks ---
+# --- Dummy HTTP Server for Render Health Checks ---
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Bot is running 24/7!")
+
+    def do_HEAD(self):
+        # Render sends HEAD requests for health checks!
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
+    # Silence logs so health pings don't flood your console
+    def log_message(self, format, *args):
+        return
 
 
 def run_dummy_server():
