@@ -390,6 +390,7 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         # Post Alert to Central Booking Info Topic
+        # Post Alert to Central Booking Info Topic
         origin_group_id = context.user_data.get("origin_group_id")
         if origin_group_id:
             try:
@@ -400,12 +401,30 @@ async def confirm_booking(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     f"📅 *Date:* {booking_date}\n"
                     f"⏰ *Time Slot:* {time_slot}"
                 )
+
+                # 1. Temporarily reopen topic 35
+                try:
+                    await context.bot.reopen_forum_topic(
+                        chat_id=origin_group_id,
+                        message_thread_id=BOOKING_TOPIC_ID
+                    )
+                except Exception:
+                    pass  # If topic is already open, ignore error and proceed
+
+                # 2. Send the message
                 await context.bot.send_message(
                     chat_id=origin_group_id,
                     message_thread_id=BOOKING_TOPIC_ID,
                     text=booking_alert_message,
                     parse_mode="Markdown",
                 )
+
+                # 3. Lock topic 35 back up immediately
+                await context.bot.close_forum_topic(
+                    chat_id=origin_group_id,
+                    message_thread_id=BOOKING_TOPIC_ID
+                )
+
             except Exception as e:
                 print(f"Could not send message to booking info topic: {e}")
     else:
