@@ -1,6 +1,6 @@
-python-telegram-bot
+python-telegram-bot>=21.0
+libsql
 gspread
 oauth2client
 python-dotenv
 httpx
-libsql
