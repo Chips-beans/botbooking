@@ -1042,7 +1042,7 @@ TURSO_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
 DEFAULT_GROUP_ID = int(os.getenv("DEFAULT_GROUP_ID", "-1003850589682"))
 BOOKING_TOPIC_ID = int(os.getenv("BOOKING_TOPIC_ID", "35"))
 TEAMS = [f"Team {i}" for i in range(1, 17)]
-ROOMS = ["Conference Room A", "Conference Room B"]
+ROOMS = ["A203", "A205"]
 ALLOWED_DAYS = [0, 1, 3, 4, 5, 6]
 # Conversation States
 TEAM, ROOM, DATE, START_TIME, ENTER_MINUTES, CONFIRM = range(6)
