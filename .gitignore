@@ -24,3 +24,5 @@ Thumbs.db
 # IDE & Editor Settings
 .vscode/
 .idea/
+
+newbot.py
