@@ -1647,16 +1647,24 @@ async def receive_minutes(
     try:
         minutes = int(text_input)
     except ValueError:
+        cancel_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
+        ])
         await update.message.reply_text(
             "❌ Please enter a valid number for minutes \\(e\\.g\\., 30, 45, 60\\)\\.",
             parse_mode="MarkdownV2",
+            reply_markup=cancel_keyboard,
         )
         return ENTER_MINUTES
 
     if minutes <= 0:
+        cancel_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
+        ])
         await update.message.reply_text(
             "❌ Minutes must be greater than 0\\.",
             parse_mode="MarkdownV2",
+            reply_markup=cancel_keyboard,
         )
         return ENTER_MINUTES
 
@@ -1665,10 +1673,15 @@ async def receive_minutes(
         sync_get_team_quota, selected_team
     )
 
+    # Attach a Cancel button when team has insufficient quota or 0 time left
     if minutes > remaining_mins:
+        cancel_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
+        ])
         await update.message.reply_text(
             f"❌ Team *{esc(selected_team)}* cannot book {minutes} mins\\. You only have *{remaining_mins} minutes* left this week\\.",
             parse_mode="MarkdownV2",
+            reply_markup=cancel_keyboard,
         )
         return ENTER_MINUTES
 
@@ -1680,9 +1693,13 @@ async def receive_minutes(
         st_hr = start_total_mins // 60
         st_mn = start_total_mins % 60
         st_str = f"{st_hr:02d}:{st_mn:02d}"
+        cancel_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
+        ])
         await update.message.reply_text(
             f"❌ Rooms close at 5:00 PM\\. The maximum duration you can book starting from {esc(st_str)} is *{max_allowed_mins} minutes*\\.",
             parse_mode="MarkdownV2",
+            reply_markup=cancel_keyboard,
         )
         return ENTER_MINUTES
 
