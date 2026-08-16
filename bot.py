@@ -8,7 +8,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import pytz
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 # Telegram imports
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -30,8 +30,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-LOCAL_TZ = ZoneInfo("Asia/Phnom_Penh")
-# LOCAL_TZ = ZoneInfo("Pacific/Auckland")
+LOCAL_TZ = timezone(timedelta(hours=-12))
 TURSO_URL = os.getenv("TURSO_DATABASE_URL")
 TURSO_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
 DEFAULT_GROUP_ID = int(os.getenv("DEFAULT_GROUP_ID", "-1004469241236"))
@@ -195,7 +194,7 @@ def sync_get_booked_slots_summary(room: str, date_str: str) -> list[str]:
         end_hr, end_m = end_min // 60, end_min % 60
 
         formatted_slots.append(
-            f"• 🔴 `{st_hr:02d}:{st_m:02d} - {end_hr:02d}:{end_m:02d}` ({team} - {user_handle})"
+            f"• 🔴 {st_hr:02d}:{st_m:02d} - {end_hr:02d}:{end_m:02d} ({team} - {user_handle})"
         )
 
     return formatted_slots
@@ -319,7 +318,8 @@ def build_date_keyboard(offset_days=0):
     now = datetime.now(LOCAL_TZ)
     today_date = now.date()
     current_time_mins = now.hour * 60 + now.minute
-    CLOSE_MIN = 17 * 60  # 5:00 PM closing time
+    # CLOSE_MIN = 17 * 60  # 5:00 PM closing time
+    CLOSE_MIN = 24 * 60
 
     # Calculate Monday of target week
     base_date = today_date + timedelta(days=offset_days)
@@ -564,7 +564,15 @@ async def receive_start_time(
 
     if start_total_mins is None:
         await update.message.reply_text(
-            "❌ Invalid time format\\. Please type the start time like `13:30`, `14:00`, or `1:30`\\.",
+            r"❌ Invalid time format\. Please type the start time like `13:30`, `14:00`, or `1:30`\.",
+            parse_mode="MarkdownV2",
+        )
+        return START_TIME
+
+    # Enforce 30-minute slots (e.g., 13:00, 13:30, 14:00)
+    if start_total_mins % 15 != 0:
+        await update.message.reply_text(
+            r"❌ Start time must be in 15\-minute intervals \(e\.g\., `13:00`, `13:15`, `13:30`\)\.",
             parse_mode="MarkdownV2",
         )
         return START_TIME
@@ -574,7 +582,7 @@ async def receive_start_time(
 
     if start_total_mins < OPEN_MIN or start_total_mins >= CLOSE_MIN:
         await update.message.reply_text(
-            "❌ Start time must be between *13:00 \\(1:00 PM\\)* and *17:00 \\(5:00 PM\\)*\\.",
+            r"❌ Start time must be between *13:00 \(1:00 PM\)* and *17:00 \(5:00 PM\)*\.",
             parse_mode="MarkdownV2",
         )
         return START_TIME
@@ -589,7 +597,7 @@ async def receive_start_time(
         if start_total_mins <= current_time_mins:
             curr_hr, curr_mn = now.hour, now.minute
             await update.message.reply_text(
-                f"❌ That time has already passed today \\(Current time is `{curr_hr:02d}:{curr_mn:02d}`\\)\\. Please select a future time\\.",
+                rf"❌ That time has already passed today \(Current time is `{curr_hr:02d}:{curr_mn:02d}`\)\. Please select a future time\.",
                 parse_mode="MarkdownV2",
             )
             return START_TIME
@@ -602,7 +610,7 @@ async def receive_start_time(
     )
     if is_conflict:
         await update.message.reply_text(
-            "❌ That start time lands inside an existing booking\\! Please check the schedule above and try another start time\\.",
+            r"❌ That start time lands inside an existing booking\! Please check the schedule above and try another start time\.",
             parse_mode="MarkdownV2",
         )
         return START_TIME
@@ -638,26 +646,34 @@ async def receive_minutes(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     text_input = update.message.text.strip()
+    cancel_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
+    ])
 
     try:
         minutes = int(text_input)
     except ValueError:
-        cancel_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
-        ])
         await update.message.reply_text(
-            "❌ Please enter a valid number for minutes \\(e\\.g\\., 30, 45, 60\\)\\.",
+            r"❌ Please enter a valid number for minutes \(e\.g\., 15, 30, 45, 60\)\.",
             parse_mode="MarkdownV2",
             reply_markup=cancel_keyboard,
         )
         return ENTER_MINUTES
 
-    if minutes <= 0:
-        cancel_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
-        ])
+    # Enforce minimum duration requirement
+    MIN_DURATION = 15
+    if minutes < MIN_DURATION:
         await update.message.reply_text(
-            "❌ Minutes must be greater than 0\\.",
+            rf"❌ Booking duration must be at least *{MIN_DURATION} minutes*\.",
+            parse_mode="MarkdownV2",
+            reply_markup=cancel_keyboard,
+        )
+        return ENTER_MINUTES
+
+    # Enforce 15-minute intervals (e.g., 15, 30, 45, 60)
+    if minutes % 15 != 0:
+        await update.message.reply_text(
+            r"❌ Booking duration must be in 15\-minute intervals \(e\.g\., 15, 30, 45, 60\)\.",
             parse_mode="MarkdownV2",
             reply_markup=cancel_keyboard,
         )
@@ -670,11 +686,8 @@ async def receive_minutes(
 
     # Attach a Cancel button when team has insufficient quota or 0 time left
     if minutes > remaining_mins:
-        cancel_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
-        ])
         await update.message.reply_text(
-            f"❌ Team *{esc(selected_team)}* cannot book {minutes} mins\\. You only have *{remaining_mins} minutes* left this week\\.",
+            rf"❌ Team *{esc(selected_team)}* cannot book {minutes} mins\. You only have *{remaining_mins} minutes* left this week\.",
             parse_mode="MarkdownV2",
             reply_markup=cancel_keyboard,
         )
@@ -688,11 +701,8 @@ async def receive_minutes(
         st_hr = start_total_mins // 60
         st_mn = start_total_mins % 60
         st_str = f"{st_hr:02d}:{st_mn:02d}"
-        cancel_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
-        ])
         await update.message.reply_text(
-            f"❌ Rooms close at 5:00 PM\\. The maximum duration you can book starting from {esc(st_str)} is *{max_allowed_mins} minutes*\\.",
+            rf"❌ Rooms close at 5:00 PM\. The maximum duration you can book starting from {esc(st_str)} is *{max_allowed_mins} minutes*\.",
             parse_mode="MarkdownV2",
             reply_markup=cancel_keyboard,
         )
@@ -706,7 +716,7 @@ async def receive_minutes(
     )
     if is_conflict:
         await update.message.reply_text(
-            "❌ *Conflict Detected\\!* Your duration overlaps with another team's booking\\. Please try a shorter duration or pick a different start time with /book\\.",
+            r"❌ *Conflict Detected\!* Your duration overlaps with another team's booking\. Please try a shorter duration or pick a different start time with /book\.",
             parse_mode="MarkdownV2",
         )
         return ConversationHandler.END
@@ -743,6 +753,44 @@ async def receive_minutes(
     )
     return CONFIRM
 
+async def back_to_start_time(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    # Immediately clear the loading spinner on Telegram UI
+    await query.answer()
+
+    room = context.user_data.get("room", "N/A")
+    selected_date = context.user_data.get("booking_date", "N/A")
+
+    # Fetch existing reservations asynchronously to prevent event loop blocking
+    booked_slots = await asyncio.to_thread(
+        sync_get_booked_slots_summary, room, selected_date
+    )
+
+    if booked_slots:
+        schedule_text = "📅 *Existing Reservations \\(Start \\- End\\):*\n" + "\n".join(
+            [esc(slot) for slot in booked_slots]
+        )
+    else:
+        schedule_text = "🟢 *No bookings yet for this date\\! Entire schedule is open\\.*"
+
+    cancel_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
+    ])
+
+    await query.edit_message_text(
+        text=(
+            f"🚪 Room: *{esc(room)}*\n"
+            f"📅 Date: *{esc(selected_date)}*\n\n"
+            f"{schedule_text}\n\n"
+            f"Please *type your desired Start Time* \\(e\\.g\\., `13:00`, `13:30`\\):"
+        ),
+        parse_mode="MarkdownV2",
+        reply_markup=cancel_keyboard,
+    )
+
+    return START_TIME
 
 def sync_write_turso_booking(
     room, booking_date, start_minutes, duration_minutes, user_id, tg_user, team
@@ -839,7 +887,7 @@ async def confirm_booking(
     )
     if target_group_id:
         booking_alert_message = (
-            f"📢 *New Room Reservation*\n\n"
+            f"📢 *New Room Reservation* \n\n"
             f"👥 *Team:* {esc(team)} \\({esc(tg_user)}\\)\n"
             f"🚪 *Room:* {esc(room)}\n"
             f"📅 *Date:* {esc(booking_date)}\n"
@@ -958,9 +1006,9 @@ def main():
                 ),
             ],
             ENTER_MINUTES: [
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND, receive_minutes
-                )
+                CallbackQueryHandler(back_to_start_time, pattern="^BACK_TO_START_TIME$"),
+                CallbackQueryHandler(cancel, pattern="^CANCEL$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_minutes),
             ],
             CONFIRM: [
                 CallbackQueryHandler(
