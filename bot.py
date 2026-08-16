@@ -865,6 +865,34 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("Operation cancelled.")
     return ConversationHandler.END
 
+async def restart_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Resets all stored state and restarts the booking conversation."""
+    user = update.effective_user
+    context.user_data.clear()
+
+    context.user_data["telegram_user"] = (
+        f"@{user.username}" if user.username else user.first_name
+    )
+
+    keyboard = []
+    row = []
+    for team in TEAMS:
+        row.append(InlineKeyboardButton(team, callback_data=f"TEAM_{team}"))
+        if len(row) == 4:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    await update.message.reply_text(
+        r"🔄 *Booking Process Restarted\!*" + "\n\nPlease select your *Team*:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return TEAM
+
 
 async def error_handler(
     update: object, context: ContextTypes.DEFAULT_TYPE
@@ -876,13 +904,28 @@ async def error_handler(
 async def run_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
     await asyncio.to_thread(cleanup_expired_bookings)
 
+async def post_init(application: Application):
+    from telegram import BotCommand
+    commands = [
+        BotCommand("book", "Book a room slot"),
+        BotCommand("restart", "Restart the current booking process"),
+        BotCommand("cancel", "Cancel current operation"),
+    ]
+    await application.bot.set_my_commands(commands)
 
 # --- MAIN APPLICATION ENTRYPOINT ---
 def main():
     sync_init_turso_db()
 
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
-    app = Application.builder().token(TOKEN).request(request).build()
+
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .request(request)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_error_handler(error_handler)
 
@@ -893,6 +936,7 @@ def main():
         entry_points=[
             CommandHandler("book", start),
             CommandHandler("start", start),
+            CommandHandler("restart", restart_command),
         ],
         states={
             TEAM: [CallbackQueryHandler(team_choice, pattern="^TEAM_")],
@@ -923,7 +967,10 @@ def main():
                 )
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel),
+            CommandHandler("restart", restart_command),
+            CallbackQueryHandler(cancel, pattern="^CANCEL$"),
+        ],
         per_chat=True,
         per_user=True,
         per_message=False,
