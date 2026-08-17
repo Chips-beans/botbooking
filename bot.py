@@ -8,12 +8,13 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import pytz
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, time, timedelta
 
 # Telegram imports
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
@@ -30,14 +31,15 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-LOCAL_TZ = timezone(timedelta(hours=-12))
+# LOCAL_TZ = timezone(timedelta(hours=+7))
+LOCAL_TZ = pytz.timezone("Asia/Phnom_Penh")
 TURSO_URL = os.getenv("TURSO_DATABASE_URL")
 TURSO_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
 DEFAULT_GROUP_ID = int(os.getenv("DEFAULT_GROUP_ID", "-1004469241236"))
 BOOKING_TOPIC_ID = int(os.getenv("BOOKING_TOPIC_ID", "57"))
 TEAMS = [f"Team {i}" for i in range(1, 17)]
 ROOMS = ["A203", "A205"]
-ALLOWED_DAYS = [0, 1, 3, 4, 5, 6]
+ALLOWED_DAYS = [0, 1, 3, 4]
 # Conversation States
 TEAM, ROOM, DATE, START_TIME, ENTER_MINUTES, CONFIRM = range(6)
 
@@ -175,6 +177,12 @@ def sync_update_team_quota(team_name: str, minutes_to_subtract: int):
     )
     conn.commit()
 
+def sync_reset_all_team_quotas():
+    conn = get_turso_conn()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE team_quota SET remaining_minutes = 120")
+    conn.commit()
+
 
 def sync_get_booked_slots_summary(room: str, date_str: str) -> list[str]:
     conn = get_turso_conn()
@@ -287,7 +295,7 @@ def cleanup_expired_bookings():
                         full_dt_str, "%Y-%m-%d %H:%M"
                     ).replace(tzinfo=LOCAL_TZ)
                     if now > booking_end_dt:
-                        sheet.delete_row(idx)
+                        sheet.delete_rows(idx)
                 except ValueError:
                     continue
     except Exception as e:
@@ -318,8 +326,8 @@ def build_date_keyboard(offset_days=0):
     now = datetime.now(LOCAL_TZ)
     today_date = now.date()
     current_time_mins = now.hour * 60 + now.minute
-    # CLOSE_MIN = 17 * 60  # 5:00 PM closing time
-    CLOSE_MIN = 24 * 60
+    CLOSE_MIN = 17 * 60  # 5:00 PM closing time
+    # CLOSE_MIN = 24 * 60
 
     # Calculate Monday of target week
     base_date = today_date + timedelta(days=offset_days)
@@ -533,7 +541,7 @@ async def date_choice(
             f"{schedule_text}\n\n"
             f"⏰ *Operating Hours:* 13:00 \\- 17:00 \\(1:00 PM \\- 5:00 PM\\)\n\n"
             f"Please *type your desired Start Time* \\(e\\.g\\., `13:00`, `13:30`, `14:15`, or `1:30`\\):\n"
-            f"_\(Or click Back below to pick another date\)_"
+            f"_\\(Or click Back below to pick another date\\)_"
         ),
         parse_mode="MarkdownV2",
         reply_markup=keyboard,
@@ -715,11 +723,37 @@ async def receive_minutes(
         room, booking_date, start_total_mins, minutes
     )
     if is_conflict:
-        await update.message.reply_text(
-            r"❌ *Conflict Detected\!* Your duration overlaps with another team's booking\. Please try a shorter duration or pick a different start time with /book\.",
-            parse_mode="MarkdownV2",
+        # Re-fetch schedule so the user can see existing bookings
+        booked_slots = await asyncio.to_thread(
+            sync_get_booked_slots_summary, room, booking_date
         )
-        return ConversationHandler.END
+
+        if booked_slots:
+            schedule_text = "📅 *Existing Reservations \\(Start \\- End\\):*\n" + "\n".join(
+                [esc(slot) for slot in booked_slots]
+            )
+        else:
+            schedule_text = "🟢 *No bookings yet for this date\\! Entire schedule is open\\.*"
+
+        retry_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Back to Start Time", callback_data="BACK_TO_START_TIME")],
+            [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
+        ])
+
+        st_hr, st_mn = start_total_mins // 60, start_total_mins % 60
+        st_str = f"{st_hr:02d}:{st_mn:02d}"
+
+        await update.message.reply_text(
+            text=(
+                f"❌ *Conflict Detected\\!*\n"
+                f"A duration of *{minutes} minutes* starting at `{esc(st_str)}` overlaps with another booking\\.\n\n"
+                f"{schedule_text}\n\n"
+                f"Please type a *shorter duration in minutes* \\(e\\.g\\., `15`, `30`\\) or choose an option below:"
+            ),
+            parse_mode="MarkdownV2",
+            reply_markup=retry_keyboard,
+        )
+        return ENTER_MINUTES
 
     context.user_data["duration_minutes"] = minutes
 
@@ -962,9 +996,19 @@ async def post_init(application: Application):
     ]
     await application.bot.set_my_commands(commands)
 
+async def weekly_quota_reset_job(context: ContextTypes.DEFAULT_TYPE):
+    """Resets remaining quota to 120 minutes for all teams every Monday."""
+    try:
+        await asyncio.to_thread(sync_reset_all_team_quotas)
+        print("🔄 Weekly quota successfully reset for all teams.")
+    except Exception as e:
+        print(f"❌ Failed to reset weekly quota: {e}")
+
 # --- MAIN APPLICATION ENTRYPOINT ---
 def main():
     sync_init_turso_db()
+
+
 
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
 
@@ -977,9 +1021,17 @@ def main():
     )
 
     app.add_error_handler(error_handler)
-
+    
     if app.job_queue:
         app.job_queue.run_repeating(run_cleanup_job, interval=600, first=10)
+
+        # Schedule weekly quota reset every Monday at 00:00 (Asia/Phnom_Penh)
+        app.job_queue.run_daily(
+            weekly_quota_reset_job,
+            time=time(hour=0, minute=0, second=0, tzinfo=LOCAL_TZ),  # <-- Change to time(...)
+            days=(1,),  # 1 represents Monday in PTB
+            name="weekly_quota_reset",
+        )
 
     conv_handler = ConversationHandler(
         entry_points=[
@@ -1016,7 +1068,8 @@ def main():
                 )
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel),
+        fallbacks=[
+            CommandHandler("cancel", cancel),
             CommandHandler("restart", restart_command),
             CallbackQueryHandler(cancel, pattern="^CANCEL$"),
         ],
