@@ -28,6 +28,7 @@ from telegram.request import HTTPXRequest
 import libsql
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+# from google.oauth2.service_account import Credentials
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
