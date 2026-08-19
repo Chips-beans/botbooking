@@ -26,3 +26,5 @@ Thumbs.db
 .idea/
 
 newbot.py
+*.db
+server.py
