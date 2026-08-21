@@ -82,6 +82,7 @@ def main():
             ],
             handlers.START_TIME: [
                 CallbackQueryHandler(handlers.back_to_date, pattern="^BACK_TO_DATE$"),
+                CallbackQueryHandler(handlers.cancel, pattern="^CANCEL$"),
                 MessageHandler(
                     filters.TEXT & ~filters.COMMAND, handlers.receive_start_time
                 ),
@@ -110,6 +111,8 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("cancel_booking", handlers.list_bookings_to_cancel))
     app.add_handler(CallbackQueryHandler(handlers.handle_cancel_booking_callback, pattern=r"^cancel_db_\d+$"))
+
+
 
     print("⚡ Room booking bot running with SQLite...")
     app.run_polling()

@@ -60,8 +60,8 @@ def sync_init_db():
     conn = get_db_conn()
     cursor = conn.cursor()
 
-    cursor.execute(
-        """
+    # 1. Create tables if they don't exist
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS bookings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             room TEXT NOT NULL,
@@ -71,49 +71,57 @@ def sync_init_db():
             user_id INTEGER NOT NULL,
             user_handle TEXT NOT NULL,
             team TEXT NOT NULL,
+            group_message_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """
-    )
-    cursor.execute(
-        """
+    """)
+
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS team_quota (
-            team TEXT PRIMARY KEY,
+            team_name TEXT PRIMARY KEY,
             remaining_minutes INTEGER DEFAULT 120
         )
-    """
-    )
+    """)
 
+    # 2. Populate default team_quota rows (Team 1 to Team 16) if table was just created
+    for i in range(1, 17):
+        cursor.execute(
+            "INSERT OR IGNORE INTO team_quota (team_name, remaining_minutes) VALUES (?, 120)",
+            (f"Team {i}",)
+        )
+
+    # 3. Handle schema migrations safely
     cursor.execute("PRAGMA table_info(bookings)")
     columns = [row[1] for row in cursor.fetchall()]
 
     if "start_minutes" not in columns:
         cursor.execute("ALTER TABLE bookings ADD COLUMN start_minutes INTEGER")
         if "start_hour" in columns:
-            cursor.execute(
-                """
+            cursor.execute("""
                 UPDATE bookings 
                 SET start_minutes = CASE 
                     WHEN start_hour <= 24 THEN start_hour * 60 
                     ELSE start_hour 
                 END
-            """
-            )
+            """)
 
+    if "group_message_id" not in columns:
+        cursor.execute("ALTER TABLE bookings ADD COLUMN group_message_id INTEGER")
+
+    # 4. Commit once and close the connection at the end
     conn.commit()
     conn.close()
-
 
 def sync_get_team_quota(team_name: str) -> int:
     conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT remaining_minutes FROM team_quota WHERE team = ?", (team_name,)
+        "SELECT remaining_minutes FROM team_quota WHERE team_name = ?", (team_name,)
     )
     row = cursor.fetchone()
     if not row:
         cursor.execute(
-            "INSERT INTO team_quota (team, remaining_minutes) VALUES (?, 120)",
+            "INSERT INTO team_quota (team_name, remaining_minutes) VALUES (?, 120)",
             (team_name,),
         )
         conn.commit()
@@ -128,7 +136,7 @@ def sync_update_team_quota(team_name: str, minutes_to_subtract: int):
     conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE team_quota SET remaining_minutes = remaining_minutes - ? WHERE team = ?",
+        "UPDATE team_quota SET remaining_minutes = remaining_minutes - ? WHERE team_name = ?",
         (minutes_to_subtract, team_name),
     )
     conn.commit()
@@ -217,22 +225,24 @@ def sync_cleanup_old_bookings():
         print(f"Error during SQLite database cleanup: {e}")
 
 
-def sync_write_sqlite_booking(
-    room, booking_date, start_minutes, duration_minutes, user_id, tg_user, team
-):
+def sync_write_sqlite_booking(room, booking_date, start_minutes, duration_minutes, user_id, tg_user, team) -> int:
     conn = get_db_conn()
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO bookings (room, booking_date, start_minutes, duration_minutes, user_id, user_handle, team) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            room,
-            booking_date,
-            start_minutes,
-            duration_minutes,
-            user_id,
-            tg_user,
-            team,
-        ),
+        (room, booking_date, start_minutes, duration_minutes, user_id, tg_user, team),
+    )
+    booking_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return booking_id
+
+def sync_update_booking_group_message(booking_id: int, message_id: int):
+    conn = get_db_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE bookings SET group_message_id = ? WHERE id = ?",
+        (message_id, booking_id),
     )
     conn.commit()
     conn.close()
@@ -255,9 +265,8 @@ def sync_cancel_user_booking(booking_id: int, user_id: int) -> dict | None:
     conn = get_db_conn()
     cursor = conn.cursor()
 
-    # Find the target booking first
     cursor.execute(
-        "SELECT team, duration_minutes, room, booking_date, start_minutes FROM bookings WHERE id = ? AND user_id = ?",
+        "SELECT team, duration_minutes, room, booking_date, start_minutes, group_message_id FROM bookings WHERE id = ? AND user_id = ?",
         (booking_id, user_id),
     )
     row = cursor.fetchone()
@@ -271,13 +280,12 @@ def sync_cancel_user_booking(booking_id: int, user_id: int) -> dict | None:
     room = row["room"]
     b_date = row["booking_date"]
     start_min = row["start_minutes"]
+    group_msg_id = row["group_message_id"]
 
-    # Delete booking record
     cursor.execute("DELETE FROM bookings WHERE id = ?", (booking_id,))
-
-    # Refund team quota
+    # Fixed WHERE column name to team_name
     cursor.execute(
-        "UPDATE team_quota SET remaining_minutes = remaining_minutes + ? WHERE team = ?",
+        "UPDATE team_quota SET remaining_minutes = remaining_minutes + ? WHERE team_name = ?",
         (duration, team),
     )
 
@@ -290,4 +298,27 @@ def sync_cancel_user_booking(booking_id: int, user_id: int) -> dict | None:
         "room": room,
         "date": b_date,
         "start_minutes": start_min,
+        "group_message_id": group_msg_id,
     }
+
+
+
+
+
+
+
+
+# def sync_reset_teams_1_to_16_quotas(minutes: int = 120):
+#     conn = get_db_conn()
+#     cursor = conn.cursor()
+    
+#     # Loop through Team 1 to Team 16 and set remaining_minutes to 120
+#     for i in range(1, 17):
+#         team_name = f"Team {i}"
+#         cursor.execute(
+#             "UPDATE team_quota SET remaining_minutes = ? WHERE team_name = ?",
+#             (minutes, team_name)
+#         )
+    
+#     conn.commit()
+#     conn.close()

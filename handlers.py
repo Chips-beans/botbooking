@@ -13,7 +13,7 @@ import database as db
 TEAMS = [f"Team {i}" for i in range(1, 17)]
 ROOMS = ["A203", "A205"]
 ALLOWED_DAYS = [0, 1, 2, 3, 4]
-DEFAULT_GROUP_ID = os.environ.get("DEFAULT_GROUP_ID")
+DEFAULT_GROUP_ID = os.environ.get("TELEGRAM_GROUP_ID")
 BOOKING_TOPIC_ID = os.environ.get("BOOKING_TOPIC_ID")
 LOCAL_TZ = pytz.timezone("Asia/Phnom_Penh")
 
@@ -266,18 +266,30 @@ async def date_choice(
         [[InlineKeyboardButton("⬅️ Back to Date Selection", callback_data="BACK_TO_DATE")]]
     )
 
-    await query.edit_message_text(
-        text=(
-            f"🚪 Room: *{esc(room)}*\n"
-            f"📅 Date: *{esc(selected_date)}*\n\n"
-            f"{schedule_text}\n\n"
-            f"⏰ *Operating Hours:* 13:00 \\- 17:00 \\(1:00 PM \\- 5:00 PM\\)\n\n"
-            f"Please *type your desired Start Time* \\(e\\.g\\., `13:00`, `13:30`, `14:15`, or `1:30`\\):\n"
-            f"_\\(Or click Back below to pick another date\\)_"
-        ),
-        parse_mode="MarkdownV2",
-        reply_markup=keyboard,
+    # Completely escaped text for MarkdownV2 compliance
+    text_content = (
+        f"🚪 Room: *{esc(room)}*\n"
+        f"📅 Date: *{esc(selected_date)}*\n\n"
+        f"{schedule_text}\n\n"
+        f"⏰ *Operating Hours:* 13:00 \\- 17:00 \\(1:00 PM \\- 5:00 PM\\)\n\n"
+        f"Please *type your desired Start Time* \\(e\\.g\\., `13:00`, `13:30`, `14:15`, or `1:30`\\):\n"
+        f"_\\(Or click Back below to pick another date\\)_"
     )
+
+    try:
+        await query.edit_message_text(
+            text=text_content,
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard,
+        )
+    except Exception as e:
+        print(f"Error editing message in date_choice: {e}")
+        await query.message.reply_text(
+            text=text_content,
+            parse_mode="MarkdownV2",
+            reply_markup=keyboard,
+        )
+
     return START_TIME
 
 
@@ -299,34 +311,54 @@ async def back_to_date(
 async def receive_start_time(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
+    # 1. Ensure essential session state exists
+    booking_date_str = context.user_data.get("booking_date")
+    room = context.user_data.get("room")
+
+    if not booking_date_str or not room:
+        await update.message.reply_text(
+            "⚠️ Session state lost. Please restart reservation with /start or /book."
+        )
+        return ConversationHandler.END
+
     text_input = update.message.text.strip()
     start_total_mins = parse_time_to_minutes(text_input)
 
+    cancel_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Date Selection", callback_data="BACK_TO_DATE")],
+        [InlineKeyboardButton("❌ Cancel Booking", callback_data="CANCEL")]
+    ])
+
+    # 2. Validate time format
     if start_total_mins is None:
         await update.message.reply_text(
-            r"❌ Invalid time format\. Please type the start time like `13:30`, `14:00`, or `1:30`\.",
+            f"❌ Invalid time format: `{esc(text_input)}`\n\nPlease type the start time like `13:00`, `13:30`, or `1:30`:",
             parse_mode="MarkdownV2",
+            reply_markup=cancel_keyboard,
         )
-        return START_TIME
+        return START_TIME  # Explicitly remain in START_TIME state
 
+    # 3. Validate 15-minute intervals
     if start_total_mins % 15 != 0:
         await update.message.reply_text(
-            r"❌ Start time must be in 15\-minute intervals \(e\.g\., `13:00`, `13:15`, `13:30`\)\.",
+            r"❌ Start time must be in 15\-minute intervals \(e\.g\., `13:00`, `13:15`, `13:30`\)\.\n\nPlease enter a valid time:",
             parse_mode="MarkdownV2",
+            reply_markup=cancel_keyboard,
         )
         return START_TIME
 
+    # 4. Operating hours check
     OPEN_MIN = 13 * 60
     CLOSE_MIN = 17 * 60
-
     if start_total_mins < OPEN_MIN or start_total_mins >= CLOSE_MIN:
         await update.message.reply_text(
-            r"❌ Start time must be between *13:00 \(1:00 PM\)* and *17:00 \(5:00 PM\)*\.",
+            r"❌ Start time must be between *13:00 \(1:00 PM\)* and *17:00 \(5:00 PM\)*\.\n\nPlease enter another start time:",
             parse_mode="MarkdownV2",
+            reply_markup=cancel_keyboard,
         )
         return START_TIME
 
-    booking_date_str = context.user_data["booking_date"]
+    # 5. Check if time has already passed today
     now = datetime.now(LOCAL_TZ)
     today_str = now.strftime("%Y-%m-%d")
 
@@ -335,30 +367,40 @@ async def receive_start_time(
         if start_total_mins <= current_time_mins:
             curr_hr, curr_mn = now.hour, now.minute
             await update.message.reply_text(
-                rf"❌ That time has already passed today \(Current time is `{curr_hr:02d}:{curr_mn:02d}`\)\. Please select a future time\.",
+                rf"❌ That time has already passed today \(Current time is `{curr_hr:02d}:{curr_mn:02d}`\)\.\n\nPlease enter a future time:",
                 parse_mode="MarkdownV2",
+                reply_markup=cancel_keyboard,
             )
             return START_TIME
 
-    room = context.user_data["room"]
-    booking_date = context.user_data["booking_date"]
-
-    is_conflict = await is_slot_conflicting(
-        room, booking_date, start_total_mins, 1
-    )
-    if is_conflict:
-        await update.message.reply_text(
-            r"❌ That start time lands inside an existing booking\! Please check the schedule above and try another start time\.",
-            parse_mode="MarkdownV2",
+    # 6. Check slot conflict safely
+    try:
+        is_conflict = await is_slot_conflicting(
+            room, booking_date_str, start_total_mins, 1
         )
+        if is_conflict:
+            await update.message.reply_text(
+                r"❌ That start time lands inside an existing booking\! Please check the schedule above and try another start time:",
+                parse_mode="MarkdownV2",
+                reply_markup=cancel_keyboard,
+            )
+            return START_TIME
+    except Exception as e:
+        print(f"Database error during slot conflict check: {e}")
+        await update.message.reply_text("⚠️ Error checking availability. Please try again.")
         return START_TIME
 
+    # Save validated time
     context.user_data["start_total_mins"] = start_total_mins
 
-    selected_team = context.user_data["team"]
-    remaining_mins = await asyncio.to_thread(
-        db.sync_get_team_quota, selected_team
-    )
+    selected_team = context.user_data.get("team", "N/A")
+    try:
+        remaining_mins = await asyncio.to_thread(
+            db.sync_get_team_quota, selected_team
+        )
+    except Exception as e:
+        print(f"Database error fetching team quota: {e}")
+        remaining_mins = 0
 
     hr = start_total_mins // 60
     mn = start_total_mins % 60
@@ -554,14 +596,16 @@ async def back_to_start_time(
 
 async def send_group_notification(context, target_group_id, message):
     try:
-        await context.bot.send_message(
+        sent_msg = await context.bot.send_message(
             chat_id=target_group_id,
             message_thread_id=BOOKING_TOPIC_ID if BOOKING_TOPIC_ID else None,
             text=message,
             parse_mode="MarkdownV2",
         )
+        return sent_msg.message_id
     except Exception as e:
         print(f"❌ Failed to send group alert: {e}")
+        return None
 
 
 async def confirm_booking(
@@ -590,29 +634,17 @@ async def confirm_booking(
         return ConversationHandler.END
 
     try:
-        await asyncio.to_thread(
+        booking_id = await asyncio.to_thread(
             db.sync_write_sqlite_booking,
-            room,
-            booking_date,
-            start_total_mins,
-            duration_minutes,
-            user_id,
-            tg_user,
-            team,
+            room, booking_date, start_total_mins, duration_minutes, user_id, tg_user, team
         )
-        await asyncio.to_thread(
-            db.sync_update_team_quota, team, duration_minutes
-        )
+        await asyncio.to_thread(db.sync_update_team_quota, team, duration_minutes)
     except Exception as e:
-        print(f"SQLite write/quota error: {e}")
-        await query.edit_message_text(
-            "⚠️ Database error occurred. Please try again."
-        )
+        print(f"SQLite write error: {e}")
+        await query.edit_message_text("⚠️ Database error occurred. Please try again.")
         return ConversationHandler.END
 
-    target_group_id = (
-        context.user_data.get("origin_group_id") or DEFAULT_GROUP_ID
-    )
+    target_group_id = context.user_data.get("origin_group_id") or DEFAULT_GROUP_ID
     if target_group_id:
         booking_alert_message = (
             f"📢 *New Room Reservation* \n\n"
@@ -621,11 +653,10 @@ async def confirm_booking(
             f"📅 *Date:* {esc(booking_date)}\n"
             f"⏰ *Time:* `{esc(time_slot_str)}` \\({duration_minutes} mins\\)"
         )
-        asyncio.create_task(
-            send_group_notification(
-                context, target_group_id, booking_alert_message
-            )
-        )
+        sent_message_id = await send_group_notification(context, target_group_id, booking_alert_message)
+        
+        if sent_message_id:
+            await asyncio.to_thread(db.sync_update_booking_group_message, booking_id, sent_message_id)
 
     await query.edit_message_text(
         f"✅ Reservation confirmed for *{room}* on *{booking_date}* (`{time_slot_str}`)! {duration_minutes} mins deducted from your weekly quota.",
@@ -693,6 +724,19 @@ async def handle_cancel_booking_callback(update: Update, context: ContextTypes.D
     result = await asyncio.to_thread(db.sync_cancel_user_booking, booking_id, user_id)
 
     if result:
+        # Delete group confirmation message if it exists
+        group_msg_id = result.get("group_message_id")
+        target_group_id = context.user_data.get("origin_group_id") or DEFAULT_GROUP_ID
+
+        if group_msg_id and target_group_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=target_group_id,
+                    message_id=group_msg_id
+                )
+            except Exception as e:
+                print(f"Failed to delete group message: {e}")
+
         st_min = result["start_minutes"]
         st_hr, st_m = st_min // 60, st_min % 60
         await query.edit_message_text(
@@ -702,7 +746,6 @@ async def handle_cancel_booking_callback(update: Update, context: ContextTypes.D
         )
     else:
         await query.edit_message_text("⚠️ Could not cancel reservation. It may have already been removed.")
-
 
 async def error_handler(
     update: object, context: ContextTypes.DEFAULT_TYPE
@@ -721,3 +764,18 @@ async def weekly_quota_reset_job(context: ContextTypes.DEFAULT_TYPE):
         print("🔄 Weekly quota successfully reset for all teams.")
     except Exception as e:
         print(f"❌ Failed to reset weekly quota: {e}")
+
+
+
+
+# async def reset_all_teams_quota_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+#     """Usage: /resetallquotas"""
+#     try:
+#         await asyncio.to_thread(db.sync_reset_teams_1_to_16_quotas, 120)
+#         await update.message.reply_text(
+#             "✅ Quotas for *Team 1* through *Team 16* have been set to *120 minutes*.",
+#             parse_mode="MarkdownV2",
+#         )
+#     except Exception as e:
+#         print(f"Error resetting quotas: {e}")
+#         await update.message.reply_text("⚠️ Database error occurred while setting quotas.")
